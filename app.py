@@ -224,15 +224,29 @@ def answer_question(question):
 
         return len({order["product"] for order in relevant})
 
-    # Best-selling product by total units in paid orders.
+   
+    # Top-selling product: use revenue when the question asks for revenue.
     if any(
         word in q
-        for word in ["best-selling", "bestselling", "most sold", "top-selling"]
+        for word in [
+            "best-selling", "bestselling", "most sold",
+            "top-selling", "top selling", "highest-selling"
+        ]
     ):
         totals = {}
 
-        for order in selected:
-            if order["status"] == "paid":
+        paid_orders = [
+            order for order in selected
+            if order["status"] == "paid"
+        ]
+
+        if "revenue" in q or "by revenue" in q or "sales value" in q:
+            for order in paid_orders:
+                product = order["product"]
+                totals[product] = totals.get(product, 0.0) + usd(order)
+
+        else:
+            for order in paid_orders:
                 product = order["product"]
                 totals[product] = totals.get(product, 0) + int(order["qty"])
 
