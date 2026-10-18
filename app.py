@@ -603,10 +603,12 @@ def ask():
     try:
         answer = answer_question(question)
         return jsonify({"answer": answer})
+    
     except Exception:
-    logging.exception("Unable to load ledger data")
-    ORDERS = []
-    RATES = {"USD": 1.0}
+        logging.exception("Unable to load ledger data")
+        ORDERS = []
+        RATES = {"USD": 1.0}
+
 
 
 if __name__ == "__main__":
