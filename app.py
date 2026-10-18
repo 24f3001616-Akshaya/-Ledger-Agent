@@ -5,70 +5,87 @@ import json
 import requests
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from urllib.parse import urlparse, parse_qs
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# Paste your complete working API URL from Colab here.
-DATA_URL = os.environ.get("DATA_URL", "PASTE_YOUR_FULL_API_URL_HERE")
-
+DATA_URL = os.environ.get("DATA_URL", "").strip()
 TZ = ZoneInfo("Asia/Kolkata")
 SESSION = requests.Session()
 
+
 def fetch_data(path):
-    """Fetch one API endpoint using the assignment credentials."""
-    from urllib.parse import urlparse, parse_qs
+    """Fetch data from the assignment API."""
+    if not DATA_URL or "PASTE_YOUR_FULL_API_URL_HERE" in DATA_URL:
+        raise RuntimeError("DATA_URL is not configured correctly.")
 
     parsed = urlparse(DATA_URL)
     params = {
-        k: v[0] for k, v in parse_qs(parsed.query).items()
+        key: values[0]
+        for key, values in parse_qs(parsed.query).items()
     }
     params["path"] = path
 
     response = SESSION.get(
         f"{parsed.scheme}://{parsed.netloc}{parsed.path}",
         params=params,
-        timeout=10,
+        timeout=12,
     )
     response.raise_for_status()
     return response
 
+
 def load_ledger():
-    # The export endpoint returns newline-delimited JSON.
+    """Load all orders and keep the latest version of each order ID."""
     response = fetch_data("/export")
+
     rows = [
         json.loads(line)
         for line in response.text.splitlines()
         if line.strip()
     ]
 
-    # Keep the newest version of each order ID.
     latest = {}
-    for row in rows:
-        order_id = row["id"]
+
+    for order in rows:
+        order_id = order["id"]
+        existing = latest.get(order_id)
+
         if (
-            order_id not in latest
-            or row["updated_at"] > latest[order_id]["updated_at"]
+            existing is None
+            or order["updated_at"] > existing["updated_at"]
         ):
-            latest[order_id] = row
+            latest[order_id] = order
 
     rates_data = fetch_data("/rates").json()
     rates = rates_data["usd_per_unit"]
 
     return list(latest.values()), rates
 
+
 ORDERS, RATES = load_ledger()
 
+
 def local_date(value):
+    """Convert a timestamp into its Asia/Kolkata calendar date."""
     dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=TZ)
+
     return dt.astimezone(TZ).date()
 
+
 def usd(order):
-    return float(order["amount"]) * RATES[order["currency"]]
+    """Convert an order amount to USD."""
+    return float(order["amount"]) * float(RATES[order["currency"]])
+
 
 def month_range(question):
-    """Return inclusive start and exclusive end dates if a month is mentioned."""
+    """Find a month and optional year in the question."""
     q = question.lower()
+
     months = {
         "january": 1, "jan": 1,
         "february": 2, "feb": 2,
@@ -78,127 +95,206 @@ def month_range(question):
         "june": 6, "jun": 6,
         "july": 7, "jul": 7,
         "august": 8, "aug": 8,
-        "september": 9, "sep": 9, "sept": 9,
+        "september": 9, "sept": 9, "sep": 9,
         "october": 10, "oct": 10,
         "november": 11, "nov": 11,
         "december": 12, "dec": 12,
     }
 
     for name, month in months.items():
-        match = re.search(
-            rf"\b{name}\b(?:\s+(?:of\s+)?)?(20\d{{2}})?",
-            q
-        )
+        pattern = rf"\b{name}\b(?:\s+(?:of\s+)?)?(20\d{{2}})?"
+        match = re.search(pattern, q)
+
         if match:
             year = int(match.group(1)) if match.group(1) else 2026
             start = datetime(year, month, 1).date()
+
             if month == 12:
                 end = datetime(year + 1, 1, 1).date()
             else:
                 end = datetime(year, month + 1, 1).date()
+
             return start, end
 
     return None, None
 
+
 def extract_region(question):
-    q = question.lower()
     for region in ["North", "South", "East", "West", "Central"]:
-        if re.search(rf"\b{region.lower()}\b", q):
+        if re.search(rf"\b{region}\b", question, re.IGNORECASE):
             return region
+
     return None
+
 
 def extract_product(question):
     q = question.lower()
+
     products = sorted(
-        {o["product"] for o in ORDERS},
+        {order["product"] for order in ORDERS},
         key=len,
-        reverse=True
+        reverse=True,
     )
+
     for product in products:
         if product.lower() in q:
             return product
+
     return None
+
 
 def extract_customer(question):
     match = re.search(r"\bC\d{4}\b", question, re.IGNORECASE)
     return match.group(0).upper() if match else None
 
-def answer_question(question):
-    q = question.lower().strip()
 
-    start, end = month_range(q)
+def filter_orders(question):
+    """Apply date, region, product, and customer filters."""
+    start, end = month_range(question)
     region = extract_region(question)
     product = extract_product(question)
     customer = extract_customer(question)
 
-    # Use created_at for the period of an order.
     selected = ORDERS[:]
 
-    if start:
+    if start is not None:
         selected = [
-            o for o in selected
-            if start <= local_date(o["created_at"]) < end
+            order for order in selected
+            if start <= local_date(order["created_at"]) < end
         ]
 
     if region:
-        selected = [o for o in selected if o["region"] == region]
+        selected = [
+            order for order in selected
+            if order["region"].lower() == region.lower()
+        ]
 
     if product:
-        selected = [o for o in selected if o["product"] == product]
+        selected = [
+            order for order in selected
+            if order["product"].lower() == product.lower()
+        ]
 
     if customer:
-        selected = [o for o in selected if o["customer"] == customer]
+        selected = [
+            order for order in selected
+            if order["customer"].upper() == customer
+        ]
 
-    # Revenue counts only paid orders.
-    if any(word in q for word in ["revenue", "sales", "sold", "turnover"]):
-        paid = [o for o in selected if o["status"] == "paid"]
-        return round(sum(usd(o) for o in paid), 2)
+    return selected
 
-    # Refund amounts are reported separately from revenue.
-    if any(word in q for word in ["refund", "refunded"]):
-        refunded = [o for o in selected if o["status"] == "refunded"]
-        return round(sum(usd(o) for o in refunded), 2)
 
-    # Order counts.
-    if any(word in q for word in ["how many orders", "number of orders", "count"]):
-        return len(selected)
+def answer_question(question):
+    q = question.lower().strip()
+    selected = filter_orders(question)
 
-    # Quantity totals.
-    if any(word in q for word in ["how many units", "units sold", "quantity", "qty"]):
-        relevant = [o for o in selected if o["status"] == "paid"]
-        return sum(o["qty"] for o in relevant)
-
-    # Customer questions.
-    if "customer" in q and any(
-        word in q for word in ["unique", "distinct", "how many"]
+    # Distinct customers: apply the paid filter BEFORE counting.
+    if (
+        "customer" in q
+        and any(
+            word in q
+            for word in ["unique", "distinct", "different", "how many"]
+        )
     ):
-        return len({o["customer"] for o in selected})
+        relevant = selected
 
-    # Product questions.
-    if "product" in q and any(
-        word in q for word in ["unique", "distinct", "how many"]
+        if "paid" in q or "placed" in q:
+            relevant = [
+                order for order in relevant
+                if order["status"] == "paid"
+            ]
+
+        return len({order["customer"] for order in relevant})
+
+    # Distinct products.
+    if (
+        "product" in q
+        and any(
+            word in q
+            for word in ["unique", "distinct", "different", "how many"]
+        )
     ):
-        return len({o["product"] for o in selected})
+        relevant = selected
 
-    # Return the most common product for simple "best-selling" questions.
-    if any(word in q for word in ["best-selling", "bestselling", "most sold"]):
+        if "paid" in q:
+            relevant = [
+                order for order in relevant
+                if order["status"] == "paid"
+            ]
+
+        return len({order["product"] for order in relevant})
+
+    # Best-selling product by total units in paid orders.
+    if any(
+        word in q
+        for word in ["best-selling", "bestselling", "most sold", "top-selling"]
+    ):
         totals = {}
-        for o in selected:
-            if o["status"] == "paid":
-                totals[o["product"]] = (
-                    totals.get(o["product"], 0) + o["qty"]
-                )
-        return max(totals, key=totals.get) if totals else None
+
+        for order in selected:
+            if order["status"] == "paid":
+                product = order["product"]
+                totals[product] = totals.get(product, 0) + int(order["qty"])
+
+        if not totals:
+            return None
+
+        return max(totals, key=totals.get)
+
+    # Total revenue: only paid orders count.
+    if any(
+        word in q
+        for word in ["revenue", "sales", "turnover", "total sold"]
+    ):
+        paid = [
+            order for order in selected
+            if order["status"] == "paid"
+        ]
+        return round(sum(usd(order) for order in paid), 2)
+
+    # Refund totals.
+    if any(word in q for word in ["refund", "refunded"]):
+        refunded = [
+            order for order in selected
+            if order["status"] == "refunded"
+        ]
+        return round(sum(usd(order) for order in refunded), 2)
+
+    # Number of units sold.
+    if any(
+        word in q
+        for word in ["units sold", "how many units", "quantity", "qty"]
+    ):
+        paid = [
+            order for order in selected
+            if order["status"] == "paid"
+        ]
+        return sum(int(order["qty"]) for order in paid)
+
+    # Number of orders. Count distinct order IDs.
+    if any(
+        phrase in q
+        for phrase in [
+            "how many orders",
+            "number of orders",
+            "count orders",
+            "order count",
+            "orders were placed",
+        ]
+    ):
+        return len({order["id"] for order in selected})
 
     return None
+
 
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
         "service": "Ledger Agent",
         "status": "ready",
-        "orders_loaded": len(ORDERS)
+        "orders_loaded": len(ORDERS),
     })
+
 
 @app.route("/", methods=["POST"])
 def handle_question():
@@ -211,12 +307,13 @@ def handle_question():
     try:
         answer = answer_question(question)
         return jsonify({"answer": answer})
-    except Exception as exc:
+    except Exception:
         app.logger.exception("Question processing failed")
-        return jsonify({"answer": None, "error": str(exc)}), 500
+        return jsonify({"answer": None}), 500
+
 
 if __name__ == "__main__":
     app.run(
         host="0.0.0.0",
-        port=int(os.environ.get("PORT", 10000))
+        port=int(os.environ.get("PORT", 10000)),
     )
