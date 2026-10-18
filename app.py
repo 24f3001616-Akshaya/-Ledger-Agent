@@ -604,8 +604,9 @@ def ask():
         answer = answer_question(question)
         return jsonify({"answer": answer})
     except Exception:
-        logging.exception("Question processing failed.")
-        return jsonify({"answer": None}), 500
+    logging.exception("Unable to load ledger data")
+    ORDERS = []
+    RATES = {"USD": 1.0}
 
 
 if __name__ == "__main__":
