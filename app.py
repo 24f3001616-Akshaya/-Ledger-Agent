@@ -356,14 +356,26 @@ def answer_question(question):
             if order.get("product") is not None
         })
 
-    # E. Refund total. Check before general revenue.
-    if "refund" in q or "refunded" in q:
-        orders = [
-            order for order in selected
-            if str(order.get("status", "")).lower() == "refunded"
-        ]
+    
+# E. Refund questions: distinguish count from amount.
+if "refund" in q or "refunded" in q:
+    refunded_orders = [
+        order for order in selected
+        if str(order.get("status", "")).lower() == "refunded"
+    ]
 
-        return round(sum(usd(order) for order in orders), 2)
+    # Questions asking how many orders want a count, not a dollar amount.
+    if any(phrase in q for phrase in [
+        "how many", "number of", "count of", "count orders",
+        "number of orders",
+    ]) and "amount" not in q and "value" not in q:
+        return len({
+            order["id"]
+            for order in refunded_orders
+            if order.get("id") is not None
+        })
+
+    return round(sum(usd(order) for order in refunded_orders), 2)
 
     # F. Total revenue / sales / turnover.
     # Only paid orders contribute to revenue.
