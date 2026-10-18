@@ -39,7 +39,6 @@ def fetch_data(path):
 def load_ledger():
     """Load all orders and keep the latest version of each order ID."""
     response = fetch_data("/export")
-
     rows = [
         json.loads(line)
         for line in response.text.splitlines()
@@ -47,7 +46,6 @@ def load_ledger():
     ]
 
     latest = {}
-
     for order in rows:
         order_id = order["id"]
         existing = latest.get(order_id)
@@ -123,13 +121,11 @@ def extract_region(question):
     for region in ["North", "South", "East", "West", "Central"]:
         if re.search(rf"\b{region}\b", question, re.IGNORECASE):
             return region
-
     return None
 
 
 def extract_product(question):
     q = question.lower()
-
     products = sorted(
         {order["product"] for order in ORDERS},
         key=len,
@@ -139,7 +135,6 @@ def extract_product(question):
     for product in products:
         if product.lower() in q:
             return product
-
     return None
 
 
@@ -188,7 +183,22 @@ def answer_question(question):
     q = question.lower().strip()
     selected = filter_orders(question)
 
-    # Distinct customers: apply the paid filter BEFORE counting.
+    # Average paid order value in USD.
+    # Apply all filters first, then average paid orders only.
+    if any(word in q for word in ["average", "avg", "mean"]):
+        if "order" in q or "order value" in q:
+            paid_orders = [
+                order for order in selected
+                if order["status"] == "paid"
+            ]
+
+            if not paid_orders:
+                return None
+
+            total_usd = sum(usd(order) for order in paid_orders)
+            return round(total_usd / len(paid_orders), 2)
+
+    # Distinct customers.
     if (
         "customer" in q
         and any(
@@ -224,38 +234,33 @@ def answer_question(question):
 
         return len({order["product"] for order in relevant})
 
-   
-    # Top-selling product: use revenue when the question asks for revenue.
+    # Top-selling product: revenue or units sold.
     if any(
         word in q
         for word in [
             "best-selling", "bestselling", "most sold",
-            "top-selling", "top selling", "highest-selling"
+            "top-selling", "top selling", "highest-selling",
+            "top selling product",
         ]
     ):
         totals = {}
-
         paid_orders = [
             order for order in selected
             if order["status"] == "paid"
         ]
 
-        if "revenue" in q or "by revenue" in q or "sales value" in q:
+        if any(word in q for word in ["revenue", "sales value"]):
             for order in paid_orders:
                 product = order["product"]
                 totals[product] = totals.get(product, 0.0) + usd(order)
-
         else:
             for order in paid_orders:
                 product = order["product"]
                 totals[product] = totals.get(product, 0) + int(order["qty"])
 
-        if not totals:
-            return None
+        return max(totals, key=totals.get) if totals else None
 
-        return max(totals, key=totals.get)
-
-    # Total revenue: only paid orders count.
+    # Revenue: paid orders only.
     if any(
         word in q
         for word in ["revenue", "sales", "turnover", "total sold"]
@@ -267,7 +272,7 @@ def answer_question(question):
         return round(sum(usd(order) for order in paid), 2)
 
     # Refund totals.
-    if any(word in q for word in ["refund", "refunded"]):
+    if "refund" in q or "refunded" in q:
         refunded = [
             order for order in selected
             if order["status"] == "refunded"
@@ -285,7 +290,7 @@ def answer_question(question):
         ]
         return sum(int(order["qty"]) for order in paid)
 
-    # Number of orders. Count distinct order IDs.
+    # Number of orders.
     if any(
         phrase in q
         for phrase in [
